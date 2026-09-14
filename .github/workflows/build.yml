@@ -22,7 +22,9 @@ jobs:
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          # This legacy private package is not repository-linked, so the workflow
+          # GITHUB_TOKEN cannot write it. Store a packages:write PAT as GHCR_PAT.
+          password: ${{ secrets.GHCR_PAT }}
 
       - name: Build and push
         uses: docker/build-push-action@v6
