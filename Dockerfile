@@ -29,6 +29,17 @@
 #   su pagine aziendali): per esso gli scope restano INVARIATI.
 #   Fix: nel provider PERSONALE, ridurre gli scope a openid/profile/w_member_social.
 #
+# BUG 3 - Il provider PAGE chiede scope OIDC personali (openid/profile) e usa /userinfo
+#   L'app LinkedIn di Rubinia ha Community Management API (Development Tier) ma NON
+#   "Sign In with LinkedIn using OpenID Connect". LinkedIn quindi concede gli scope
+#   org (rw_organization_admin, w_organization_social, r_organization_social) e
+#   r_basicprofile, ma RIFIUTA openid/profile con `unauthorized_scope_error`.
+#   Poiche' generateAuthUrl() chiede anche openid/profile, l'autorizzazione della
+#   Pagina fallisce alla radice. Inoltre authenticate() chiama /v2/userinfo (OIDC).
+#   Fix: nel provider PAGE rimuovere openid/profile/w_member_social dagli scope e
+#   sostituire /v2/userinfo con /v2/me (coperto da r_basicprofile). Il flusso Page
+#   seleziona poi l'organizzazione; nome/logo reali arrivano da reConnect().
+#
 # -----------------------------------------------------------------------------
 # PERCHE' UN' IMMAGINE CUSTOM E NON UNA VIA NATIVA
 # -----------------------------------------------------------------------------
@@ -48,10 +59,10 @@
 # -----------------------------------------------------------------------------
 # FILE PATCHATI (le 4 copie runtime compilate reali nell'immagine)
 # -----------------------------------------------------------------------------
-#   apps/backend/dist/.../linkedin.provider.js         <- prompt + scope
-#   apps/backend/dist/.../linkedin.page.provider.js    <- solo prompt
-#   apps/orchestrator/dist/.../linkedin.provider.js    <- prompt + scope
-#   apps/orchestrator/dist/.../linkedin.page.provider.js <- solo prompt
+#   apps/backend/dist/.../linkedin.provider.js           <- prompt + scope personale
+#   apps/backend/dist/.../linkedin.page.provider.js      <- prompt + CM-only scope + no OIDC
+#   apps/orchestrator/dist/.../linkedin.provider.js      <- prompt + scope personale
+#   apps/orchestrator/dist/.../linkedin.page.provider.js <- prompt + CM-only scope + no OIDC
 # (l'orchestrator esegue il worker Temporal: senza patch qui, il refresh/publish
 #  LinkedIn userebbe il codice vecchio)
 #
@@ -101,16 +112,32 @@ RUN set -eux; \
         echo "OK scope personale: $f"; \
     done
 
-# --- Verifica che il PAGE provider conservi i suoi scope org ------------------
+# --- PAGE provider: app CM Development Tier senza OIDC ------------------------
+# L'app Rubinia ha Community Management API Development Tier, ma non il prodotto
+# "Sign In with LinkedIn using OpenID Connect". LinkedIn concede gli scope org e
+# r_basicprofile, ma rifiuta openid/profile. Postiz li chiede impropriamente anche
+# per una Page e poi invoca /userinfo (endpoint OIDC). Rimuoviamo SOLO gli scope
+# OIDC/member dal provider Page e sostituiamo /userinfo con /v2/me. Il flusso Page
+# seleziona poi l'organizzazione e reConnect() legge nome/logo reali della pagina.
 RUN set -eux; \
     PAGE="\
 /app/apps/backend/dist/libraries/nestjs-libraries/src/integrations/social/linkedin.page.provider.js \
 /app/apps/orchestrator/dist/libraries/nestjs-libraries/src/integrations/social/linkedin.page.provider.js"; \
     for f in $PAGE; do \
+        for s in openid profile w_member_social; do \
+            grep -q "'$s'" "$f" || { echo "ERRORE: scope '$s' atteso ma assente nel page provider $f"; exit 1; }; \
+        done; \
+        sed -i "/'openid',/d; /'profile',/d; /'w_member_social',/d" "$f"; \
+        sed -i 's#https://api.linkedin.com/v2/userinfo#https://api.linkedin.com/v2/me#g' "$f"; \
+        for s in openid profile w_member_social; do \
+            ! grep -q "'$s'" "$f" || { echo "ERRORE: scope OIDC '$s' ancora presente nel page provider $f"; exit 1; }; \
+        done; \
         for s in r_basicprofile rw_organization_admin w_organization_social r_organization_social; do \
             grep -q "'$s'" "$f" || { echo "ERRORE: scope org '$s' perso nel page provider $f"; exit 1; }; \
         done; \
-        echo "OK scope pagina intatti: $f"; \
+        ! grep -q 'https://api.linkedin.com/v2/userinfo' "$f" || { echo "ERRORE: userinfo OIDC residuo nel page provider $f"; exit 1; }; \
+        grep -q 'https://api.linkedin.com/v2/me' "$f" || { echo "ERRORE: fallback /v2/me assente nel page provider $f"; exit 1; }; \
+        echo "OK page provider CM-only: $f"; \
     done
 
-RUN echo "=== Patch LinkedIn completa (prompt + scope personale) applicata. ==="
+RUN echo "=== Patch LinkedIn completa (personal OIDC + page CM-only) applicata. ==="
